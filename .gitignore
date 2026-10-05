@@ -183,9 +183,8 @@ cython_debug/
 
 
 
-
-venv/
 .env
+venv/
 __pycache__/
-
 data/
+*.log
