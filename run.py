@@ -19,7 +19,7 @@ from chromadb.utils import embedding_functions  # توابع تبدیل متن �
 from openai import OpenAI  # کلاینت رسمی برای ارتباط با APIهای سازگار با OpenAI (مثل AvalAI)
 from langchain_openai import ChatOpenAI  # کلاینت مدل‌های زبانی Chat از فریم‌ورک LangChain
 from langchain_community.tools import DuckDuckGoSearchRun  # ابزار جستجوی موتور DuckDuckGo در LangChain
-from langchain_core.messages import SystemMessage, HumanMessage  # کلاس‌های ساخت پیام سیستم و پیام کاربر برای LLM
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage  # کلاس‌های ساخت پیام سیستم و پیام کاربر برای LLM
 
 # =========================================================
 # بخش ۲: پیکربندی لاگ‌گیری و متغیرهای محیطی
@@ -63,12 +63,12 @@ os.makedirs(IMAGES_DIR, exist_ok=True)  # ساخت پوشه images (اگر وج�
 
 # ساختار یک نکته هوش مصنوعی (Agent Tip)
 class AgentTip(BaseModel):
-    title_en: str = Field(description="Short title in English.")  # عنوان انگلیسی نکته
-    body_en: str = Field(description="Detailed explanation in English.")  # توضیحات کامل انگلیسی
-    title_fa: str = Field(description="Natural, fluent Persian title like an expert tech educator.")  # عنوان فارسی روان
-    body_fa: str = Field(description="Natural, fluent Persian body explanation avoiding direct word-for-word translation.")  # متن فارسی روان
-    difficulty: Literal["Beginner", "Intermediate", "Advanced"] = Field(description="Difficulty level.")  # سطح سختی نکته
-    source_url: Optional[str] = Field(default=None, description="Source URL or document link.")  # لینک منبع (اختیاری)
+    title_en: str = Field(description="Short title in English.")
+    body_en: str = Field(description="Detailed explanation in English.")
+    title_fa: str = Field(description="Natural, fluent Persian title written the way a Persian tech educator would phrase it. Avoid literal word-for-word translation.")
+    body_fa: str = Field(description="Natural, fluent Persian body explanation written the way a Persian tech educator would phrase it. Avoid literal word-for-word translation.")
+    difficulty: Literal["Beginner", "Intermediate", "Advanced"] = Field(description="Difficulty level.")
+    source_url: Optional[str] = Field(default=None, description="Source URL or document link.")
 
 # ساختار خروجی چندتایی برای تولید کاندیداها
 class TipCandidates(BaseModel):
@@ -310,21 +310,35 @@ def run_pipeline():
             temperature=0.7  # میزان خلاقیت
         )
 
-        # گام ۱: اجرای وب‌سرچ برای دریافت آخرین ایده‌ها
-        query = "latest agentic AI architecture design patterns 2026"  # عبارت جستجو
-        search_results = fetch_search_results(search_tool, query)  # انجام جستجو
+        tools = [search_tool]
+        llm_with_tools = llm.bind_tools(tools)
+        structured_llm = llm.with_structured_output(TipCandidates)
 
-        # گام ۲: تولید ۳ تا ۵ کاندیدا توسط مدل زبانی
+        # گام ۱: فراخوانی خودکار ابزار جستجو توسط مدل برای یافتن بینش جدید
         system_prompt = (
-            "You are an expert AI Agents Educator. Ground your insights on search results. "
-            "Ensure title_fa and body_fa sound extremely natural, idiomatic, and educator-like."
+            "You are an expert AI Agents Educator. "
+            "Use the search tool to find one recent, real insight about agentic AI. "
+            "Then generate 3 to 5 distinct candidate tips grounded in that finding. "
+            "Ensure title_fa and body_fa sound extremely natural, idiomatic, and educator-like, not literal translations."
         )
         messages = [
-            SystemMessage(content=system_prompt),  # دستورالعمل سیستم
-            HumanMessage(content=f"Search findings:\n{search_results}\n\nGenerate 3 to 5 candidate tips.")  # متغیر ورود نتایج
+            SystemMessage(content=system_prompt),
+            HumanMessage(content="Search for one recent, real insight about agentic AI, then generate 3 to 5 candidate tips grounded in what you found.")
         ]
-        structured_llm = llm.with_structured_output(TipCandidates)  # تحمیل فرمت خروجی Pydantic
-        result: TipCandidates = generate_candidates_with_llm(structured_llm, messages)  # دریافت خروجی
+
+        response = llm_with_tools.invoke(messages)
+        tool_messages = []
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                tool_output = search_tool.invoke(tool_call.args)
+                tool_messages.append(ToolMessage(content=str(tool_output), tool_call_id=tool_call.id))
+            messages.extend([response, *tool_messages])
+            messages.append(HumanMessage(content="Now generate 3 to 5 candidate tips based on the search results."))
+            result: TipCandidates = generate_candidates_with_llm(structured_llm, messages)
+        else:
+            messages.append(response)
+            messages.append(HumanMessage(content="I couldn't perform a web search. Please generate 3 to 5 candidate tips based on your knowledge."))
+            result: TipCandidates = generate_candidates_with_llm(structured_llm, messages)
         logger.info(f"[GENERATION] Generated {len(result.tips)} raw candidates.")  # لاگ تعداد تولیدشده‌ها
 
         # گام ۳: فیلتر کاندیداهای تکراری بر اساس شباهت معنایی
